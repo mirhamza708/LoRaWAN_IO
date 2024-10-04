@@ -3,6 +3,10 @@
 Adafruit_ADS1115 currentSensor;  /* Use this for the 16-bit version */
 Adafruit_ADS1115 voltageSensor;  /* Use this for the 16-bit version */
 
+float mapFloat(float x, float in_min, float in_max, float out_min, float out_max) {
+    return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+}
+
 uint8_t initCurrentSensor(void) {
     if (!currentSensor.begin(0x48)) {
         Serial1.println("Failed to initialize 4-20mA analog sensor.");
@@ -64,10 +68,10 @@ void getVoltageSensorReadings(_analogChannels *channel) {
     adc2 = (adc2 < 0) ? 0 : adc2;
     adc3 = (adc3 < 0) ? 0 : adc3;
 
-    channel->first = map(adc0, 0, 17460, 0, 10);
-    channel->second = map(adc1, 0, 17460, 0, 10);
-    channel->third = map(adc2, 0, 17460, 0, 10);
-    channel->fourth = map(adc3, 0, 17460, 0, 10);
+    channel->first = mapFloat(adc0, 0, 17460, 0.0, 10.0);
+    channel->second = mapFloat(adc1, 0, 17460, 0.0, 10.0);
+    channel->third = mapFloat(adc2, 0, 17460, 0.0, 10.0);
+    channel->fourth = mapFloat(adc3, 0, 17460, 0.0, 10.0);
 
     Serial1.println("---------0-10V Analog readings---------");
     Serial1.print("C1: "); Serial1.print(adc0); Serial1.print("  "); Serial1.print(channel->first); Serial1.println("V");

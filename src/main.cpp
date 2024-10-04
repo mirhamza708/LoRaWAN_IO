@@ -1,11 +1,19 @@
 #include <Arduino.h>
 #include <SPI.h>
+#include <EEPROM.h>
 #include "analogSection.h"
 #include "relays.h"
 #include "pwmOutput.h"
 #include "ArduinoJson.h"
+#include "myLorawan.h"
+#include "appData.h"
+
+_appData appData;
 
 #define STATUS_LED PC13
+#define LED_HI 0
+#define LED_LO 1
+uint8_t ledState = 0;
 
 HardwareSerial Serial1(PA10, PA9);
 
@@ -19,8 +27,75 @@ const char* devfrq    = "EU-868";                                               
 const char* devdebug  = "USART ";                                                   // Available debug mode.
 const char* chipid    = "0x410";                                                    // Available MCU id.
 
-_analogChannels voltagechannels;
-_analogChannels currentChannels;
+////////////////////////////////////// Beelan Library //////////////////////////////////////////
+// OTAA credentials
+const char *devEui = "730054ae38ca1885";
+const char *appEui = "0000000000000002";
+const char *appKey = "0b687cef4bbb2b54c3a0fd12e225da8f";
+
+const unsigned long lorawanTxInterval = 60000 * 3;    // 10 s interval to send message
+unsigned long previousLorawanTxMillis = 0;        // will store last time message sen
+
+char myStr[50];
+char outStr[255];
+byte recvStatus = 0;
+bool sendack = false;
+
+const sRFM_pins RFM_pins = {
+  .CS = PA4,
+  .RST = PC14,
+  .DIO0 = PA1,
+  .DIO1 = PB13,
+  .DIO2 = PB11,
+  .DIO5 = -1,
+};
+
+uint16_t myDevNonce = 0;
+int eeDevNonceAddress = 10;
+uint8_t isFreshStart = 0;
+int eeFreshStartAddress = 15;
+
+const unsigned long adsReadInterval = 10000;    // 10 s interval to send message
+unsigned long adsPreviousReadMillis = 0;        // will store last time message sen
+
+void timerInterrupt()
+{
+  if(ledState == 0) {
+    digitalWrite(STATUS_LED, LED_HI);
+    ledState = 1;
+  } else if (ledState == 1) {
+    digitalWrite(STATUS_LED, LED_LO);
+    ledState = 0;
+  }
+  lora.update();
+
+  if(lora.readAck()) Serial1.println("ack received");
+}
+
+void message(sBuffer *msg, bool isConfirmed, uint8_t fPort){
+
+  char Buff[255];
+  int size = msg->Counter;
+
+  memset(Buff, 0x00, size + 1);
+  memcpy(Buff, msg->Data, size);
+
+  Serial1.println("--------------------");
+  Serial1.print("Msg size as bytes : ");
+  Serial1.println(msg->Counter);
+  Serial1.print("Message :");
+  Serial1.println(Buff);
+  Serial1.print("Port :");
+  Serial1.println(fPort);
+
+  if(isConfirmed){
+
+    Serial1.println("ACK response Should be sent !");
+    sendack = true;
+    
+  }
+
+}
 
 void setup() {
   uint8_t ret = 0;
@@ -49,31 +124,111 @@ void setup() {
     Serial1.println("Voltage sensor initialization failed, shutting down!");
     return;
   }
-}
 
-void loop() {
-  // put your main code here, to run repeatedly:
-  digitalWrite(STATUS_LED, HIGH);
+  //get device nonces from eeprom
+  EEPROM.get(eeFreshStartAddress, isFreshStart);
+  Serial1.print("isFreshStart: ");
+  Serial1.println(isFreshStart);
+  if (isFreshStart == 1) {
+    myDevNonce = 0;
+    isFreshStart = 2;
+    EEPROM.put(eeFreshStartAddress, isFreshStart);
+  } else if (isFreshStart == 2) {
+    EEPROM.get(eeDevNonceAddress, myDevNonce);
+  } else {
+    myDevNonce = 0;
+    isFreshStart = 2;
+    EEPROM.put(eeDevNonceAddress, myDevNonce);
+    EEPROM.put(eeFreshStartAddress, isFreshStart);
+  }
+  Serial1.print("Lorawan Devnonce: ");
+  Serial1.println(myDevNonce);
+
+  if(!lora.init()){
+    Serial1.println("RFM95 not detected");
+    delay(5000);
+    return;
+  }
+
+  lora.setDeviceClass(CLASS_C);
+
+  // Set Data Rate
+  lora.setDataRate(SF9BW125);
+
+  // set channel to random
+  lora.setChannel(MULTI);
+  
+  // Put OTAA Key and DevAddress here
+  lora.setDevEUI(devEui);
+  lora.setAppEUI(appEui);
+  lora.setAppKey(appKey);
+
+  // Set Callback function
+  lora.onMessage(message);
+
+  delay(1000);
+  // Join procedure
+  bool isJoined = 0;
+  uint8_t joiningCounter = 0;
+  while (!isJoined)
+  {
+    Serial1.println("Joining LORAWAN network...");
+    digitalWrite(STATUS_LED, HIGH);
+    isJoined = lora.join();
+    digitalWrite(STATUS_LED, LOW);
+    if ((isJoined == 0) && (joiningCounter >= 1)) {
+      Serial1.print("Devnonce already used incrementing and trying again..");
+      myDevNonce++;
+      Serial1.print("Devnonce: ");
+      Serial1.println(myDevNonce);
+      delay(random(10000, 15000));
+      joiningCounter = 0;
+    } else {
+      delay(10000);
+    }
+    joiningCounter++;
+  }
+  Serial1.println("Joined to LORAWAN network");
+  EEPROM.put(eeDevNonceAddress, myDevNonce);
+
+
+  digitalWrite(STATUS_LED, LED_LO);
   for (int i = 0; i < 4; i++) {
     switchRelay(i, HIGH);
   }
   Serial1.println("LED OFF");
-
   setPwmFrequency(100);
   setPwmDutyCycle(1, 50);
   setPwmDutyCycle(2, 93);
-  delay(5000);
-  getVoltageSensorReadings(&voltagechannels);
-  digitalWrite(STATUS_LED, LOW);
-  for (int i = 0; i < 4; i++) {
-    switchRelay(i, LOW);
+  
+  //take uplink data here
+  HardwareTimer *MyTim = new HardwareTimer(TIM2);  // TIM3 is MCU hardware peripheral instance, its definition is provided in CMSIS
+  MyTim->setOverflow(4000, MICROSEC_FORMAT); // Default format is TICK_FORMAT. Rollover will occurs when timer counter counts 10000 ticks (it reach it count from 0 to 9999)  
+  MyTim->attachInterrupt(timerInterrupt); // Userdefined call back. See 'Examples' chapter to see how to use callback with or without parameter
+  MyTim->resume();
+}
+
+void loop() {
+  if (millis() - adsPreviousReadMillis > adsReadInterval) {
+    getVoltageSensorReadings(&appData.ioData.voltage);
+    getCurrentSensorReadings(&appData.ioData.current);
+    adsPreviousReadMillis = millis();
   }
-  Serial1.println("LED ON");
-  setPwmFrequency(100000);
-  setPwmDutyCycle(1, 65);
-  setPwmDutyCycle(2, 25);
-  getCurrentSensorReadings(&currentChannels);
-  delay(5000);
+
+  //  This loop is for sending meter data via LoRaWAN at a specific interval
+  if (millis() - previousLorawanTxMillis > lorawanTxInterval) {
+    Serial1.println("Sending data packet to LoRaWAN");
+    lora.sendUplink(appData.LoRaPacketBytes, sizeof(appData.LoRaPacketBytes), 0, 1);
+    Serial1.println("Data packet sent to LoRaWAN.");
+    previousLorawanTxMillis = millis();
+  }
+
+  if (sendack) {
+    lora.sendACK();
+    sendack = false;
+  }
+
+
 }
 
 void processCommands() {
