@@ -1,12 +1,18 @@
 #include <Arduino.h>
+#include <lmic.h>
+#include <hal/hal.h>
 #include <SPI.h>
 #include <EEPROM.h>
+
 #include "analogSection.h"
 #include "relays.h"
 #include "pwmOutput.h"
 #include "ArduinoJson.h"
 #include "myLorawan.h"
 #include "appData.h"
+
+
+
 
 _appData appData;
 
@@ -27,11 +33,34 @@ const char* devfrq    = "EU-868";                                               
 const char* devdebug  = "USART ";                                                   // Available debug mode.
 const char* chipid    = "0x410";                                                    // Available MCU id.
 
-////////////////////////////////////// Beelan Library //////////////////////////////////////////
-// OTAA credentials
-const char *devEui = "730054ae38ca1885";
-const char *appEui = "0000000000000002";
-const char *appKey = "0b687cef4bbb2b54c3a0fd12e225da8f";
+// This EUI must be in little-endian format, so least-significant-byte
+// first. When copying an EUI from ttnctl output, this means to reverse
+// the bytes. For TTN issued EUIs the last bytes should be 0xD5, 0xB3,
+// 0x70.
+static const u1_t PROGMEM APPEUI[8]={ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+void os_getArtEui (u1_t* buf) { memcpy_P(buf, APPEUI, 8);}
+
+// This should also be in little endian format, see above.
+static const u1_t PROGMEM DEVEUI[8]={ 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+void os_getDevEui (u1_t* buf) { memcpy_P(buf, DEVEUI, 8);}
+
+// This key should be in big endian format (or, since it is not really a
+// number but a block of memory, endianness does not really apply). In
+// practice, a key taken from ttnctl can be copied as-is.
+// The key shown here is the semtech default key.
+static const u1_t PROGMEM APPKEY[16] = { 0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C };
+void os_getDevKey (u1_t* buf) {  memcpy_P(buf, APPKEY, 16);}
+
+static uint8_t mydata[] = "Hello, world!";
+static osjob_t sendjob;
+
+// Pin mapping
+const lmic_pinmap lmic_pins = {
+    .nss = PA4,
+    .rxtx = LMIC_UNUSED_PIN,
+    .rst = PC14,
+    .dio = {PA1, PB13, PB11},
+};
 
 const unsigned long lorawanTxInterval = 60000 * 3;    // 10 s interval to send message
 unsigned long previousLorawanTxMillis = 0;        // will store last time message sen
@@ -41,15 +70,6 @@ char outStr[255];
 byte recvStatus = 0;
 bool sendack = false;
 
-const sRFM_pins RFM_pins = {
-  .CS = PA4,
-  .RST = PC14,
-  .DIO0 = PA1,
-  .DIO1 = PB13,
-  .DIO2 = PB11,
-  .DIO5 = -1,
-};
-
 uint16_t myDevNonce = 0;
 int eeDevNonceAddress = 10;
 uint8_t isFreshStart = 0;
@@ -57,6 +77,89 @@ int eeFreshStartAddress = 15;
 
 const unsigned long adsReadInterval = 10000;    // 10 s interval to send message
 unsigned long adsPreviousReadMillis = 0;        // will store last time message sen
+
+
+void onEvent (ev_t ev) {
+    Serial.print(os_getTime());
+    Serial.print(": ");
+    switch(ev) {
+        case EV_SCAN_TIMEOUT:
+            Serial.println(F("EV_SCAN_TIMEOUT"));
+            break;
+        case EV_BEACON_FOUND:
+            Serial.println(F("EV_BEACON_FOUND"));
+            break;
+        case EV_BEACON_MISSED:
+            Serial.println(F("EV_BEACON_MISSED"));
+            break;
+        case EV_BEACON_TRACKED:
+            Serial.println(F("EV_BEACON_TRACKED"));
+            break;
+        case EV_JOINING:
+            Serial.println(F("EV_JOINING"));
+            break;
+        case EV_JOINED:
+            Serial.println(F("EV_JOINED"));
+
+            // Disable link check validation (automatically enabled
+            // during join, but not supported by TTN at this time).
+            LMIC_setLinkCheckMode(0);
+            break;
+        case EV_RFU1:
+            Serial.println(F("EV_RFU1"));
+            break;
+        case EV_JOIN_FAILED:
+            Serial.println(F("EV_JOIN_FAILED"));
+            break;
+        case EV_REJOIN_FAILED:
+            Serial.println(F("EV_REJOIN_FAILED"));
+            break;
+            break;
+        case EV_TXCOMPLETE:
+            Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+            if (LMIC.txrxFlags & TXRX_ACK)
+              Serial.println(F("Received ack"));
+            if (LMIC.dataLen) {
+              Serial.println(F("Received "));
+              Serial.println(LMIC.dataLen);
+              Serial.println(F(" bytes of payload"));
+            }
+            // Schedule next transmission
+            os_setTimedCallback(&sendjob, os_getTime()+sec2osticks(TX_INTERVAL), do_send);
+            break;
+        case EV_LOST_TSYNC:
+            Serial.println(F("EV_LOST_TSYNC"));
+            break;
+        case EV_RESET:
+            Serial.println(F("EV_RESET"));
+            break;
+        case EV_RXCOMPLETE:
+            // data received in ping slot
+            Serial.println(F("EV_RXCOMPLETE"));
+            break;
+        case EV_LINK_DEAD:
+            Serial.println(F("EV_LINK_DEAD"));
+            break;
+        case EV_LINK_ALIVE:
+            Serial.println(F("EV_LINK_ALIVE"));
+            break;
+         default:
+            Serial.println(F("Unknown event"));
+            break;
+    }
+}
+
+void do_send(osjob_t* j){
+    // Check if there is not a current TX/RX job running
+    if (LMIC.opmode & OP_TXRXPEND) {
+        Serial.println(F("OP_TXRXPEND, not sending"));
+    } else {
+        // Prepare upstream data transmission at the next possible time.
+        LMIC_setTxData2(1, mydata, sizeof(mydata)-1, 0);
+        Serial.println(F("Packet queued"));
+    }
+    // Next TX is scheduled after TX_COMPLETE event.
+}
 
 void timerInterrupt()
 {
@@ -67,34 +170,6 @@ void timerInterrupt()
     digitalWrite(STATUS_LED, LED_LO);
     ledState = 0;
   }
-  lora.update();
-
-  if(lora.readAck()) Serial1.println("ack received");
-}
-
-void message(sBuffer *msg, bool isConfirmed, uint8_t fPort){
-
-  char Buff[255];
-  int size = msg->Counter;
-
-  memset(Buff, 0x00, size + 1);
-  memcpy(Buff, msg->Data, size);
-
-  Serial1.println("--------------------");
-  Serial1.print("Msg size as bytes : ");
-  Serial1.println(msg->Counter);
-  Serial1.print("Message :");
-  Serial1.println(Buff);
-  Serial1.print("Port :");
-  Serial1.println(fPort);
-
-  if(isConfirmed){
-
-    Serial1.println("ACK response Should be sent !");
-    sendack = true;
-    
-  }
-
 }
 
 void setup() {
@@ -125,72 +200,13 @@ void setup() {
     return;
   }
 
-  //get device nonces from eeprom
-  EEPROM.get(eeFreshStartAddress, isFreshStart);
-  Serial1.print("isFreshStart: ");
-  Serial1.println(isFreshStart);
-  if (isFreshStart == 1) {
-    myDevNonce = 0;
-    isFreshStart = 2;
-    EEPROM.put(eeFreshStartAddress, isFreshStart);
-  } else if (isFreshStart == 2) {
-    EEPROM.get(eeDevNonceAddress, myDevNonce);
-  } else {
-    myDevNonce = 0;
-    isFreshStart = 2;
-    EEPROM.put(eeDevNonceAddress, myDevNonce);
-    EEPROM.put(eeFreshStartAddress, isFreshStart);
-  }
-  Serial1.print("Lorawan Devnonce: ");
-  Serial1.println(myDevNonce);
+  // LMIC init
+  os_init();
+  // Reset the MAC state. Session and pending data transfers will be discarded.
+  LMIC_reset();
 
-  if(!lora.init()){
-    Serial1.println("RFM95 not detected");
-    delay(5000);
-    return;
-  }
-
-  lora.setDeviceClass(CLASS_C);
-
-  // Set Data Rate
-  lora.setDataRate(SF9BW125);
-
-  // set channel to random
-  lora.setChannel(MULTI);
-  
-  // Put OTAA Key and DevAddress here
-  lora.setDevEUI(devEui);
-  lora.setAppEUI(appEui);
-  lora.setAppKey(appKey);
-
-  // Set Callback function
-  lora.onMessage(message);
-
-  delay(1000);
-  // Join procedure
-  bool isJoined = 0;
-  uint8_t joiningCounter = 0;
-  while (!isJoined)
-  {
-    Serial1.println("Joining LORAWAN network...");
-    digitalWrite(STATUS_LED, HIGH);
-    isJoined = lora.join();
-    digitalWrite(STATUS_LED, LOW);
-    if ((isJoined == 0) && (joiningCounter >= 1)) {
-      Serial1.print("Devnonce already used incrementing and trying again..");
-      myDevNonce++;
-      Serial1.print("Devnonce: ");
-      Serial1.println(myDevNonce);
-      delay(random(10000, 15000));
-      joiningCounter = 0;
-    } else {
-      delay(10000);
-    }
-    joiningCounter++;
-  }
-  Serial1.println("Joined to LORAWAN network");
-  EEPROM.put(eeDevNonceAddress, myDevNonce);
-
+  // Start job (sending automatically starts OTAA too)
+  do_send(&sendjob);
 
   digitalWrite(STATUS_LED, LED_LO);
   for (int i = 0; i < 4; i++) {
@@ -214,21 +230,7 @@ void loop() {
     getCurrentSensorReadings(&appData.ioData.current);
     adsPreviousReadMillis = millis();
   }
-
-  //  This loop is for sending meter data via LoRaWAN at a specific interval
-  if (millis() - previousLorawanTxMillis > lorawanTxInterval) {
-    Serial1.println("Sending data packet to LoRaWAN");
-    lora.sendUplink(appData.LoRaPacketBytes, sizeof(appData.LoRaPacketBytes), 0, 1);
-    Serial1.println("Data packet sent to LoRaWAN.");
-    previousLorawanTxMillis = millis();
-  }
-
-  if (sendack) {
-    lora.sendACK();
-    sendack = false;
-  }
-
-
+  os_runloop_once();
 }
 
 void processCommands() {
