@@ -37,6 +37,7 @@ void setPwmFrequency (uint32_t _freq) {
     setPwmDutyCycle(2, 0);
 }
 
+// *pin corresponds to the pin on the IO board enclosure
 void setPwmDutyCycle(uint32_t pin, uint32_t _dutyCycle) {
     switch (pin) {
         case 1:

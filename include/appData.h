@@ -42,7 +42,7 @@ struct _ioData {
 union _appData
 {
   _ioData ioData;
-  char LoRaPacketBytes[PACKET_SIZE];
+  uint8_t LoRaPacketBytes[PACKET_SIZE];
 };
 
 extern _appData appData;
