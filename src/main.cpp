@@ -325,7 +325,11 @@ void loop() {
     lmicStart(); //restart the lorawan again. joins and sends data again.
     lastLorawanResetMillis = millis();
   }
-
+  
+  if (messageFailedCounter >= 2) {
+    messageFailedCounter=0;
+    lmicStart();
+  }
   processSerialMessage();
 }
 

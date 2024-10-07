@@ -2,15 +2,30 @@
 #include "appData.h"
 
 osjob_t mySendjob;
-
+uint8_t messageFailedCounter = 0;
+uint8_t appFrameCnt = 0;
 void do_send(osjob_t* j){
     // Check if there is not a current TX/RX job running
     if (LMIC.opmode & OP_TXRXPEND) {
         Serial1.println(F("OP_TXRXPEND, not sending"));
     } else {
         // Prepare upstream data transmission at the next possible time.
-        LMIC_setTxData2(1, appData.LoRaPacketBytes, sizeof(appData.LoRaPacketBytes)-1, 0);
-        Serial1.println(F("Packet queued"));
+        lmic_tx_error_t ret = LMIC_setTxData2(1, appData.LoRaPacketBytes, sizeof(appData.LoRaPacketBytes)-1, 0);
+        if(ret != LMIC_ERROR_SUCCESS) {
+            Serial1.print("Error queueing data packet, error code: ");
+            Serial1.println(ret);
+            Serial1.println("Retrying once again...");
+            lmic_tx_error_t ret = LMIC_setTxData2(1, appData.LoRaPacketBytes, sizeof(appData.LoRaPacketBytes)-1, 0);
+            if(ret != LMIC_ERROR_SUCCESS) {
+                messageFailedCounter++;
+                Serial1.print("Error queueing data packet, error code: ");
+                Serial1.println(ret);
+            } else {
+                Serial1.println(F("Packet queued on second try."));
+            }
+        } else {
+            Serial1.println(F("Packet queued"));
+        }
     }
     // Next TX is scheduled after TX_COMPLETE event.
 }

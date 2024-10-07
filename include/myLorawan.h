@@ -7,6 +7,8 @@
 
 extern osjob_t mySendjob;
 
+extern uint8_t messageFailedCounter;
+
 void do_send(osjob_t* j);
 void lmicStart (void);
 
