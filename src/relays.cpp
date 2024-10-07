@@ -11,6 +11,10 @@ void initRelays() {
   pinMode(RELAY_2, OUTPUT);
   pinMode(RELAY_3, OUTPUT);
   pinMode(RELAY_4, OUTPUT);
+
+  for (int i = 0; i < 4; i++) {
+    switchRelay(i, LOW);
+  }
 }
 
 uint8_t switchRelay(uint8_t relayNo, uint8_t status) {
